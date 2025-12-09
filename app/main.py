@@ -239,74 +239,18 @@ async def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -
         image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
         logger.info(f"Scaled image from {orig_width}x{orig_height} to {new_width}x{new_height}")
     
-    # Create a white canvas at letter size with proper DPI info
-    canvas = Image.new("RGB", (LETTER_WIDTH_PX, LETTER_HEIGHT_PX), (255, 255, 255))
-    canvas.info['dpi'] = (DPI, DPI)
+    # OCR and convert to PDF
+    pdf_bytes = pytesseract.image_to_pdf_or_hocr(image, extension='pdf', config=f"--dpi {DPI}")
+    pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
     
-    # Calculate position to center the image on the canvas
-    x_offset = (LETTER_WIDTH_PX - new_width) // 2
-    y_offset = (LETTER_HEIGHT_PX - new_height) // 2
-    
-    # Paste the image onto the canvas
-    canvas.paste(image, (x_offset, y_offset))
-    
-    # Save as PDF
+    # Save PDF
     pdf_path = os.path.join(temp_dir, f"file_{identifier}.pdf")
-    canvas.save(pdf_path, "PDF", dpi=(DPI, DPI))
-    logger.info(f"Converted image to PDF with letter-size canvas: {pdf_path}")
-    
-    # Apply OCR using Tesseract to create a searchable PDF with embedded text
-    try:
-        logger.info(f"Applying OCR to image for nid {identifier}")
-        # Use pytesseract with pdf extension to create a searchable PDF from the canvas image
-        # This preserves the resized canvas dimensions
-        pdf_data = pytesseract.image_to_pdf_or_hocr(canvas, extension='pdf')
+    pdf_writer = PdfWriter()
+    for page in pdf_reader.pages:
+        pdf_writer.add_page(page)
+    with open(pdf_path, "wb") as f:
+        pdf_writer.write(f)
 
-        # Read OCR PDF bytes, scale pages to letter points to ensure correct physical size,
-        # then write out the scaled, searchable PDF.
-        try:
-            ocr_reader = PdfReader(BytesIO(pdf_data))
-            ocr_writer = PdfWriter()
-            for page in ocr_reader.pages:
-                try:
-                    # Get current page size in PDF points (1 point = 1/72 inch)
-                    current_width_pts = float(page.mediabox.width)
-                    current_height_pts = float(page.mediabox.height)
-
-                    # Convert page size from points to pixels at configured DPI
-                    current_width_px = current_width_pts * (DPI / 72.0)
-                    current_height_px = current_height_pts * (DPI / 72.0)
-
-                    # Only scale down if the page is larger than our target letter canvas in pixels
-                    if current_width_px > LETTER_WIDTH_PX or current_height_px > LETTER_HEIGHT_PX:
-                        scale_factor = min(LETTER_WIDTH_PX / current_width_px, LETTER_HEIGHT_PX / current_height_px)
-                        target_width_pts = current_width_pts * scale_factor
-                        target_height_pts = current_height_pts * scale_factor
-                        try:
-                            page.scale_to(target_width_pts, target_height_pts)
-                        except Exception:
-                            # Fallback: adjust mediabox to target sizes in points
-                            try:
-                                page.mediabox.right = target_width_pts
-                                page.mediabox.top = target_height_pts
-                            except Exception:
-                                pass
-                except Exception as e:
-                    logger.warning(f"Could not inspect/scale OCR page: {e}")
-                ocr_writer.add_page(page)
-
-            with open(pdf_path, 'wb') as f:
-                ocr_writer.write(f)
-
-            logger.info(f"OCR applied, scaled and embedded in PDF: {pdf_path}")
-        except Exception as e:
-            # If anything goes wrong with scaling, fall back to writing raw OCR PDF bytes
-            logger.warning(f"Failed to scale OCR PDF pages: {e}. Falling back to raw OCR output.")
-            with open(pdf_path, 'wb') as f:
-                f.write(pdf_data)
-    except Exception as e:
-        logger.warning(f"OCR embedding failed for image {identifier}: {str(e)}. PDF created without embedded text layer.")
-    
     return pdf_path
 
 
@@ -346,37 +290,11 @@ async def merge_pdf_files(pdf_paths: list, temp_dir: str) -> str:
     """
     writer = PdfWriter()
 
-    # # Define the target size in points (Letter size: 8.5" x 11")
-    # target_width = 612 # 72 ppi * 8.5 inches
-    # target_height = 792 # 72 ppi * 11 inches
-
     try:
         for pdf_path in pdf_paths:
             try:
                 reader = PdfReader(pdf_path)
                 for page in reader.pages:
-                    # # Calculate scaling factor to fit content within new dimensions
-                    # current_width = page.mediabox.width
-                    # current_height = page.mediabox.height
-                    
-                    # # Scale proportionally to fit within the new size while maintaining aspect ratio
-                    # scale_factor_width = target_width / current_width
-                    # scale_factor_height = target_height / current_height
-                    # scale_factor = min(scale_factor_width, scale_factor_height)
-
-                    # # Apply scaling to the content
-                    # page.scale_by(scale_factor)
-
-                    # # Set the page size (MediaBox, CropBox, etc.) to the target Letter size
-                    # # This creates a new 'canvas' size for the page
-                    # page.mediabox.right = target_width
-                    # page.mediabox.top = target_height
-                    # page.cropbox.right = target_width
-                    # page.cropbox.top = target_height
-                    # page.bleedbox.right = target_width
-                    # page.bleedbox.top = target_height
-                    # page.artbox.right = target_width
-                    # page.artbox.top = target_height
                     writer.add_page(page)
             except Exception as e:
                 logger.error(f"Failed to read PDF {pdf_path}: {e}")
