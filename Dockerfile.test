@@ -1,0 +1,13 @@
+# Dockerfile.test
+# Test image for mergepdf, based on production image
+FROM mergepdf:latest
+
+# Copy test requirements and install them
+COPY requirements-test.txt /app/requirements-test.txt
+RUN pip install --no-cache-dir -r /app/requirements-test.txt
+
+# Copy the tests directory
+COPY tests /app/tests
+
+# Default command
+CMD ["pytest", "tests/test_merge.py"]
