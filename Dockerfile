@@ -9,6 +9,9 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     libtesseract-dev \
+    libopenjp2-7 \
+    libopenjp2-tools \
+    libopenjp2-7-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set workdir
@@ -22,7 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY ./app ./app
 
 # Expose port
-EXPOSE 8000
+EXPOSE 8080
 
 # Run FastAPI with Uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

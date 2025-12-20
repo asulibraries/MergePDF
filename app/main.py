@@ -1,22 +1,29 @@
 import logging
+import base64
+import json
 from typing import Optional
-from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, Header, HTTPException, status, BackgroundTasks
 from fastapi.responses import FileResponse
 import httpx
 import tempfile
 import os
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
-from pdf2image import convert_from_bytes
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 import io
 from io import BytesIO
 import atexit
 import shutil
 import pytesseract
+from urllib.parse import urlparse, urljoin
+from datetime import datetime
+
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 # Standard DPI for PDF rendering
-DPI = int(os.getenv("MERGEPDF_DPI", "72"))
+DPI = int(os.getenv("MERGEPDF_DPI", "200"))
 
 # Letter size in pixels at standard DPI
 LETTER_WIDTH_PX = int(8.5 * DPI)
@@ -28,6 +35,17 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Merge PDF API", version="1.0.0")
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+	exc_str = f'{exc}'.replace('\n', ' ').replace('   ', ' ')
+
+    # Extract headers as a dict
+	headers = dict(request.headers)
+	headers_str = ", ".join(f"{k}: {v}" for k, v in headers.sitems())
+
+	logging.error(f"{request}: {exc_str}  | Headers: {headers_str}")
+	content = {'status_code': 10422, 'message': exc_str, 'data': None}
+	return JSONResponse(content=content, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 # Debug / keep-files flag driven by environment variable
 # Set `MERGEPDF_KEEP_FILES=1` or `true` to keep downloaded/merged files for debugging
@@ -64,7 +82,11 @@ async def health_check():
 
 
 @app.get("/merge")
-async def merge_pdfs(apix_ldp_resource: Optional[str] = Header(None), background_tasks: BackgroundTasks = None):
+async def merge_pdfs(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    islandora_event: str = Header(..., alias="X-Islandora-Event")
+):
     """
     Merge PDFs from a given resource URL.
     
@@ -72,11 +94,35 @@ async def merge_pdfs(apix_ldp_resource: Optional[str] = Header(None), background
     Appends '/members-list?_format=json' to fetch the list of documents.
     Downloads and merges the first file for each nid into a single PDF.
     """
-    if not apix_ldp_resource:
-        raise HTTPException(status_code=400, detail="Apix-Ldp-Resource header is required")
-    
+    # Decode the X-Islandora-Event header (base64 encoded JSON) and extract href
+    if not islandora_event:
+        raise HTTPException(status_code=400, detail="X-Islandora-Event header is required")
+
+    try:
+        decoded = base64.b64decode(islandora_event).decode("utf-8")
+        event_json = json.loads(decoded)
+    except Exception as e:
+        logger.error(f"Failed to decode/parse X-Islandora-Event: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid X-Islandora-Event header: must be base64 encoded JSON")
+
+    # Expecting structure: { ..., "object": { "url": [ {"href": "..."}, ... ] }, ... }
+    logger.debug(f"Event object: {json.dumps(event_json)}")
+    href = None
+    obj = event_json.get("object") if isinstance(event_json, dict) else None
+    if isinstance(obj, dict):
+        urls = obj.get("url")
+        if isinstance(urls, list):
+            for u in urls:
+                if isinstance(u, dict) and "href" in u and 'rel' in u and u.get("rel") == "canonical":
+                    href = u.get("href")
+                    break
+
+    if not href:
+        logger.error("Could not extract href from X-Islandora-Event payload")
+        raise HTTPException(status_code=400, detail="Could not extract href from X-Islandora-Event payload")
+
     # Build the members list URL
-    members_url = f"{apix_ldp_resource.rstrip('/')}/members-list?_format=json"
+    members_url = f"{href.rstrip('/')}/members-list?_format=json"
     logger.info(f"Fetching members list from: {members_url}")
     
     try:
@@ -89,7 +135,7 @@ async def merge_pdfs(apix_ldp_resource: Optional[str] = Header(None), background
         logger.error(f"Failed to connect to {members_url}: {str(e)}")
         raise HTTPException(
             status_code=503,
-            detail=f"Cannot reach the resource URL: {apix_ldp_resource}. Ensure the URL is accessible and the container has network access."
+            detail=f"Cannot reach the resource URL: {href}. Ensure the URL is accessible and the container has network access."
         )
     except httpx.TimeoutException as e:
         logger.error(f"Request timed out: {str(e)}")
@@ -134,7 +180,7 @@ async def merge_pdfs(apix_ldp_resource: Optional[str] = Header(None), background
         raise HTTPException(status_code=400, detail="No files found in members data")
     
     # Use persistent temp directory for file processing
-    processing_dir = os.path.join(PERSISTENT_TEMP_DIR, f"request_{id(apix_ldp_resource)}")
+    processing_dir = os.path.join(PERSISTENT_TEMP_DIR, f"request_{id(href)}")
     os.makedirs(processing_dir, exist_ok=True)
     
     try:
@@ -175,22 +221,75 @@ async def merge_pdfs(apix_ldp_resource: Optional[str] = Header(None), background
         
         logger.info(f"Successfully created merged PDF at: {merged_pdf_path}")
         
-        # Schedule cleanup of the processing directory after response if KEEP_FILES is not enabled
-        if not KEEP_FILES and background_tasks is not None:
-            background_tasks.add_task(shutil.rmtree, processing_dir, True)
-            return FileResponse(
-                merged_pdf_path,
-                media_type="application/pdf",
-                filename="merged.pdf",
-                background=background_tasks,
-            )
+        # Extract base URL from href
+        parsed_href = urlparse(href)
+        base_url = f"{parsed_href.scheme}://{parsed_href.netloc}"
 
-        # If KEEP_FILES is enabled or no background_tasks provided, just return the file directly
-        return FileResponse(
-            merged_pdf_path,
-            media_type="application/pdf",
-            filename="merged.pdf"
-        )
+        # Extract authorization token from request headers
+        auth_token = request.headers.get("Authorization")
+
+        # Fetch TID from term endpoint
+        tid_endpoint = f"{base_url}/term_from_term_name?vocab=islandora_media_use&name=Service+File&_format=json"
+        logger.info(f"Fetching TID from: {tid_endpoint}")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                tid_response = await client.get(tid_endpoint, headers={"Authorization": auth_token})
+                tid_response.raise_for_status()
+                tid_data = tid_response.json()
+
+                # Extract tid from .[0].tid[0].value
+                if isinstance(tid_data, list) and len(tid_data) > 0:
+                    first_item = tid_data[0]
+                    if isinstance(first_item, dict) and "tid" in first_item:
+                        tid_list = first_item["tid"]
+                        if isinstance(tid_list, list) and len(tid_list) > 0:
+                            tid_obj = tid_list[0]
+                            tid = tid_obj.get("value") if isinstance(tid_obj, dict) else tid_obj
+                            logger.info(f"Extracted TID: {tid}")
+                        else:
+                            raise ValueError("tid array is empty or not found")
+                    else:
+                        raise ValueError("First item does not have tid field")
+                else:
+                    raise ValueError("TID response is not a list or is empty")
+        except Exception as e:
+            logger.error(f"Failed to fetch TID: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to fetch TID: {str(e)}")
+
+        # PUT the PDF to the media/document endpoint
+        put_url = f"{href}/media/document/{tid}"
+        logger.info(f"Putting merged PDF to: {put_url}")
+
+        put_headers = {
+            "Content-Type": "application/pdf",
+            "Content-Location": f"private://{datetime.now().strftime('%Y-%m')}/{nid}-ServiceFile.pdf"
+            }
+        if auth_token:
+            put_headers["Authorization"] = auth_token
+            logger.info("Using Authorization token from incoming request")
+
+        try:
+            with open(merged_pdf_path, "rb") as pdf_file:
+                pdf_content = pdf_file.read()
+
+            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+                put_response = await client.put(
+                    put_url,
+                    content=pdf_content,
+                    headers=put_headers
+                )
+                put_response.raise_for_status()
+                logger.info(f"Successfully PUT PDF to {put_url}")
+        except Exception as e:
+            logger.error(f"Failed to PUT PDF: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to PUT PDF: {str(e)}")
+
+        # Schedule cleanup of the processing directory
+        if background_tasks is not None:
+            background_tasks.add_task(shutil.rmtree, processing_dir, ignore_errors=True)
+
+        return {"status": "success", "message": f"PDF successfully merged and uploaded to {put_url}"}
     
     except HTTPException:
         raise
@@ -213,6 +312,7 @@ async def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -
     Returns the path to the created PDF.
     """
     image = Image.open(io.BytesIO(file_bytes))
+    logger.debug(f"{image.filename} ({image.format}), {image.size}")
     
     # Convert to RGB if necessary (for RGBA, LA, P modes)
     if image.mode in ("RGBA", "LA", "P"):
@@ -272,14 +372,14 @@ async def convert_to_pdf(file_bytes: bytes, content_type: str, temp_dir: str, id
         try:
             return await _fit_image_to_pdf(file_bytes, temp_dir, identifier)
         except Exception as e:
-            logger.error(f"Failed to convert image to PDF: {str(e)}")
+            logger.error(f"Failed to convert image {identifier} to PDF: {str(e)}")
             return None
     
     # For other formats, try to treat as image
     try:
         return await _fit_image_to_pdf(file_bytes, temp_dir, identifier)
     except Exception as e:
-        logger.warning(f"Could not convert file with content-type {content_type}: {str(e)}")
+        logger.warning(f"Could not convert file {identifier} with content-type {content_type}: {str(e)}")
         return None
 
 
