@@ -37,6 +37,8 @@ pip install -r requirements.txt
 
 ## Running the Application
 
+> Logging level can be set with the environment variable `UVICORN_LOG_LEVEL`. E.g. `export UVICORN_LOG_LEVEL="debug"`.
+
 ### Local Development
 
 Run the FastAPI server directly:

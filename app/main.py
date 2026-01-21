@@ -8,9 +8,10 @@ import httpx
 import tempfile
 import os
 from pathlib import Path
-from pypdf import PdfReader, PdfWriter
-from PIL import Image
-Image.MAX_IMAGE_PIXELS = None
+from pypdf import PdfReader, PdfWriter, PageObject
+from PIL import Image, ImageFile, ImageOps
+Image.MAX_IMAGE_PIXELS = None # Allow big images.
+ImageFile.LOAD_TRUNCATED_IMAGES = True # Some of our JPFs require this.
 import io
 from io import BytesIO
 import atexit
@@ -123,7 +124,7 @@ async def merge_pdfs(
 
     # Build the members list URL
     members_url = f"{href.rstrip('/')}/members-list?_format=json"
-    logger.info(f"Fetching members list from: {members_url}")
+    logger.debug(f"Fetching members list from: {members_url}")
     
     try:
         # Fetch the members list
@@ -148,7 +149,7 @@ async def merge_pdfs(
     if not isinstance(members_data, list):
         raise HTTPException(status_code=400, detail="Expected JSON array from members-list endpoint")
     
-    logger.info(f"Retrieved {len(members_data)} members")
+    logger.debug(f"Retrieved {len(members_data)} members from {members_url}")
     
     # Group files by nid and get the first file for each
     files_by_nid = {}
@@ -174,10 +175,10 @@ async def merge_pdfs(
         if file_url:
             files_by_nid[nid] = file_url
     
-    logger.info(f"Found {len(files_by_nid)} unique nids with files")
+    logger.debug(f"Found {len(files_by_nid)} unique nids with files")
     
     if not files_by_nid:
-        raise HTTPException(status_code=400, detail="No files found in members data")
+        raise HTTPException(status_code=400, detail=f"No files found in members data for {members_url}")
     
     # Use persistent temp directory for file processing
     processing_dir = os.path.join(PERSISTENT_TEMP_DIR, f"request_{id(href)}")
@@ -189,7 +190,7 @@ async def merge_pdfs(
         async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             for nid, file_url in files_by_nid.items():
                 try:
-                    logger.info(f"Downloading file for nid {nid} from: {file_url}")
+                    logger.debug(f"Downloading file for nid {nid} from: {file_url}")
                     response = await client.get(file_url)
                     response.raise_for_status()
                     
@@ -216,10 +217,10 @@ async def merge_pdfs(
             raise HTTPException(status_code=500, detail="Could not convert any files to PDF")
         
         # Merge PDFs
-        logger.info(f"Merging {len(pdf_files)} PDF files")
+        logger.debug(f"Merging {len(pdf_files)} PDF files for {members_url}")
         merged_pdf_path = await merge_pdf_files(pdf_files, processing_dir)
         
-        logger.info(f"Successfully created merged PDF at: {merged_pdf_path}")
+        logger.info(f"Successfully created merged PDF ({merged_pdf_path}) for {members_url}")
         
         # Extract base URL from href
         parsed_href = urlparse(href)
@@ -230,7 +231,7 @@ async def merge_pdfs(
 
         # Fetch TID from term endpoint
         tid_endpoint = f"{base_url}/term_from_term_name?vocab=islandora_media_use&name=Service+File&_format=json"
-        logger.info(f"Fetching TID from: {tid_endpoint}")
+        logger.debug(f"Fetching TID from: {tid_endpoint}")
 
         try:
             async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
@@ -246,7 +247,7 @@ async def merge_pdfs(
                         if isinstance(tid_list, list) and len(tid_list) > 0:
                             tid_obj = tid_list[0]
                             tid = tid_obj.get("value") if isinstance(tid_obj, dict) else tid_obj
-                            logger.info(f"Extracted TID: {tid}")
+                            logger.debug(f"Extracted TID: {tid}")
                         else:
                             raise ValueError("tid array is empty or not found")
                     else:
@@ -259,7 +260,7 @@ async def merge_pdfs(
 
         # PUT the PDF to the media/document endpoint
         put_url = f"{href}/media/document/{tid}"
-        logger.info(f"Putting merged PDF to: {put_url}")
+        logger.debug(f"Putting merged PDF to: {put_url}")
 
         put_headers = {
             "Content-Type": "application/pdf",
@@ -267,7 +268,7 @@ async def merge_pdfs(
             }
         if auth_token:
             put_headers["Authorization"] = auth_token
-            logger.info("Using Authorization token from incoming request")
+            logger.debug("Using Authorization token from incoming request")
 
         try:
             with open(merged_pdf_path, "rb") as pdf_file:
@@ -294,7 +295,7 @@ async def merge_pdfs(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in merge_pdfs: {str(e)}")
+        logger.error(f"Error in merge_pdfs for {members_url}: {str(e)}")
         # Clean up processing directory on error (only if not KEEP_FILES)
         try:
             if not KEEP_FILES:
@@ -322,6 +323,13 @@ async def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -
     elif image.mode != "RGB":
         image = image.convert("RGB")
     
+    # Force orientation
+    image = ImageOps.exif_transpose(image)
+    if image.width > image.height:
+        logger.debug(f"Rotating image {image.filename} ({image.width}x{image.height}) to portrait.")
+        # Rotate 90 degrees clockwise
+        image = image.transpose(Image.ROTATE_90)
+
     # Get original image dimensions
     orig_width, orig_height = image.size
     
@@ -337,17 +345,20 @@ async def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -
     # Resize the image if needed
     if scale_factor < 1.0:
         image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        logger.info(f"Scaled image from {orig_width}x{orig_height} to {new_width}x{new_height}")
+        logger.debug(f"Scaled image from {orig_width}x{orig_height} to {new_width}x{new_height}")
     
     # OCR and convert to PDF
     pdf_bytes = pytesseract.image_to_pdf_or_hocr(image, extension='pdf', config=f"--dpi {DPI}")
     pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
-    
+
+    # Force PDF to Letter-sized (8.5x11) page
+    letter_page = PageObject.create_blank_page(width=(LETTER_WIDTH_PX * (72.0 / DPI)), height=(LETTER_HEIGHT_PX * (72.0 / DPI)))
+    letter_page.merge_page(pdf_reader.pages[0])
+
     # Save PDF
     pdf_path = os.path.join(temp_dir, f"file_{identifier}.pdf")
     pdf_writer = PdfWriter()
-    for page in pdf_reader.pages:
-        pdf_writer.add_page(page)
+    pdf_writer.add_page(letter_page)
     with open(pdf_path, "wb") as f:
         pdf_writer.write(f)
 
@@ -404,7 +415,7 @@ async def merge_pdf_files(pdf_paths: list, temp_dir: str) -> str:
         with open(merged_path, "wb") as out_f:
             writer.write(out_f)
 
-        logger.info(f"Successfully merged PDFs to: {merged_path}")
+        logger.debug(f"Successfully merged PDFs to: {merged_path}")
         return merged_path
 
     except Exception as e:

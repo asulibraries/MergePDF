@@ -7,6 +7,16 @@ from app.main import convert_to_pdf, merge_pdf_files, DPI, LETTER_WIDTH_PX, LETT
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
 @pytest.mark.asyncio
+async def test_broken_jpf():
+    image_path = os.path.join(ASSETS_DIR, "PALGEN_SEP-2736_Adjusted.jpf")
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        converted_pdf = await convert_to_pdf(image_bytes, "application/octet-stream", temp_dir, "photo")
+        assert converted_pdf is not None
+        assert os.path.exists(converted_pdf)
+
+@pytest.mark.asyncio
 async def test_image_conversion_and_page_merging():
     # Static test files
     image_path = os.path.join(ASSETS_DIR, "SM219_WeGetUpAt8AM_1900_FrontCover.jpf")
