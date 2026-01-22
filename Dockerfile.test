@@ -6,7 +6,8 @@ FROM mergepdf:latest
 COPY requirements-test.txt /app/requirements-test.txt
 RUN pip install --no-cache-dir -r /app/requirements-test.txt
 
-# Copy the tests directory
+# Copy the app and tests directories
+COPY app /app/app
 COPY tests /app/tests
 
 # Default command
