@@ -32,6 +32,7 @@ LETTER_HEIGHT_PX = int(11.0 * DPI)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Merge PDF API", version="1.0.0")
@@ -124,7 +125,7 @@ async def merge_pdfs(
 
     # Build the members list URL
     members_url = f"{href.rstrip('/')}/members-list?_format=json"
-    logger.debug(f"Fetching members list from: {members_url}")
+    logger.info(f"Processing {members_url}")
     
     try:
         # Fetch the members list
@@ -149,7 +150,7 @@ async def merge_pdfs(
     if not isinstance(members_data, list):
         raise HTTPException(status_code=400, detail="Expected JSON array from members-list endpoint")
     
-    logger.debug(f"Retrieved {len(members_data)} members from {members_url}")
+    logger.debug(f"Found {len(members_data)} members in {members_url}")
     
     # Group files by nid and get the first file for each
     files_by_nid = {}
@@ -175,7 +176,7 @@ async def merge_pdfs(
         if file_url:
             files_by_nid[nid] = file_url
     
-    logger.debug(f"Found {len(files_by_nid)} unique nids with files")
+    logger.debug(f"Found {len(files_by_nid)} unique nids with files in {members_url}")
     
     if not files_by_nid:
         raise HTTPException(status_code=400, detail=f"No files found in members data for {members_url}")
@@ -271,20 +272,13 @@ async def merge_pdfs(
             logger.debug("Using Authorization token from incoming request")
 
         try:
+            put_headers["Content-Length"] = str(os.path.getsize(merged_pdf_path))
             with open(merged_pdf_path, "rb") as pdf_file:
-                pdf_content = pdf_file.read()
-
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
-                put_response = await client.put(
-                    put_url,
-                    content=pdf_content,
-                    headers=put_headers
-                )
-                put_response.raise_for_status()
+                response = httpx.put(put_url, content=pdf_file, headers=put_headers, timeout=60.0, verify=False)
+                response.raise_for_status()
                 logger.info(f"Successfully PUT PDF to {put_url}")
         except Exception as e:
-            logger.error(f"Failed to PUT PDF: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to PUT PDF: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to PUT PDF to {put_url}: {str(e)}")
 
         # Schedule cleanup of the processing directory
         if background_tasks is not None:
@@ -313,56 +307,75 @@ async def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -
     Returns the path to the created PDF.
     """
     image = Image.open(io.BytesIO(file_bytes))
-    logger.debug(f"{image.filename} ({image.format}), {image.size}")
+    image_filename = image.filename
+    image_format = image.format
+    image_size = image.size
+    logger.debug(f"{image_filename} ({image_format}), {image_size}")
     
-    # Convert to RGB if necessary (for RGBA, LA, P modes)
-    if image.mode in ("RGBA", "LA", "P"):
-        rgb_image = Image.new("RGB", image.size, (255, 255, 255))
-        rgb_image.paste(image, mask=image.split()[-1] if image.mode in ("RGBA", "LA") else None)
-        image = rgb_image
-    elif image.mode != "RGB":
-        image = image.convert("RGB")
-    
-    # Force orientation
-    image = ImageOps.exif_transpose(image)
-    if image.width > image.height:
-        logger.debug(f"Rotating image {image.filename} ({image.width}x{image.height}) to portrait.")
-        # Rotate 90 degrees clockwise
-        image = image.transpose(Image.ROTATE_90)
+    try:
+        # Convert to RGB if necessary (for RGBA, LA, P modes)
+        if image.mode in ("RGBA", "LA", "P"):
+            rgb_image = Image.new("RGB", image.size, (255, 255, 255))
+            rgb_image.paste(image, mask=image.split()[-1] if image.mode in ("RGBA", "LA") else None)
+            image.close()
+            image = rgb_image
+        elif image.mode != "RGB":
+            converted_image = image.convert("RGB")
+            image.close()
+            image = converted_image
+        
+        # Force orientation
+        transposed_image = ImageOps.exif_transpose(image)
+        image.close()
+        image = transposed_image
+        
+        if image.width > image.height:
+            logger.debug(f"Rotating image {image_filename} ({image.width}x{image.height}) to portrait.")
+            # Rotate 90 degrees clockwise
+            rotated_image = image.transpose(Image.ROTATE_90)
+            image.close()
+            image = rotated_image
 
-    # Get original image dimensions
-    orig_width, orig_height = image.size
-    
-    # Calculate scaling factor to fit within the letter canvas while maintaining aspect ratio
-    scale_width = LETTER_WIDTH_PX / orig_width
-    scale_height = LETTER_HEIGHT_PX / orig_height
-    scale_factor = min(scale_width, scale_height, 1.0)  # Don't upscale
-    
-    # Calculate new image dimensions
-    new_width = int(orig_width * scale_factor)
-    new_height = int(orig_height * scale_factor)
-    
-    # Resize the image if needed
-    if scale_factor < 1.0:
-        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        logger.debug(f"Scaled image from {orig_width}x{orig_height} to {new_width}x{new_height}")
-    
-    # OCR and convert to PDF
-    pdf_bytes = pytesseract.image_to_pdf_or_hocr(image, extension='pdf', config=f"--dpi {DPI}")
-    pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
+        # Get original image dimensions
+        orig_width, orig_height = image.size
+        
+        # Calculate scaling factor to fit within the letter canvas while maintaining aspect ratio
+        scale_width = LETTER_WIDTH_PX / orig_width
+        scale_height = LETTER_HEIGHT_PX / orig_height
+        scale_factor = min(scale_width, scale_height, 1.0)  # Don't upscale
+        
+        # Calculate new image dimensions
+        new_width = int(orig_width * scale_factor)
+        new_height = int(orig_height * scale_factor)
+        
+        # Resize the image if needed
+        if scale_factor < 1.0:
+            resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            image.close()
+            image = resized_image
+            logger.debug(f"Scaled image from {orig_width}x{orig_height} to {new_width}x{new_height}")
+        
+        # OCR and convert to PDF
+        pdf_bytes = pytesseract.image_to_pdf_or_hocr(image, extension='pdf', config=f"--dpi {DPI}")
+        pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
 
-    # Force PDF to Letter-sized (8.5x11) page
-    letter_page = PageObject.create_blank_page(width=(LETTER_WIDTH_PX * (72.0 / DPI)), height=(LETTER_HEIGHT_PX * (72.0 / DPI)))
-    letter_page.merge_page(pdf_reader.pages[0])
+        try:
+            # Force PDF to Letter-sized (8.5x11) page
+            letter_page = PageObject.create_blank_page(width=(LETTER_WIDTH_PX * (72.0 / DPI)), height=(LETTER_HEIGHT_PX * (72.0 / DPI)))
+            letter_page.merge_page(pdf_reader.pages[0])
 
-    # Save PDF
-    pdf_path = os.path.join(temp_dir, f"file_{identifier}.pdf")
-    pdf_writer = PdfWriter()
-    pdf_writer.add_page(letter_page)
-    with open(pdf_path, "wb") as f:
-        pdf_writer.write(f)
+            # Save PDF
+            pdf_path = os.path.join(temp_dir, f"file_{identifier}.pdf")
+            pdf_writer = PdfWriter()
+            pdf_writer.add_page(letter_page)
+            with open(pdf_path, "wb") as f:
+                pdf_writer.write(f)
 
-    return pdf_path
+            return pdf_path
+        finally:
+            pdf_reader.close()
+    finally:
+        image.close()
 
 
 async def convert_to_pdf(file_bytes: bytes, content_type: str, temp_dir: str, identifier: str) -> Optional[str]:
@@ -405,8 +418,11 @@ async def merge_pdf_files(pdf_paths: list, temp_dir: str) -> str:
         for pdf_path in pdf_paths:
             try:
                 reader = PdfReader(pdf_path)
-                for page in reader.pages:
-                    writer.add_page(page)
+                try:
+                    for page in reader.pages:
+                        writer.add_page(page)
+                finally:
+                    reader.close()
             except Exception as e:
                 logger.error(f"Failed to read PDF {pdf_path}: {e}")
                 raise
