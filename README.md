@@ -8,7 +8,7 @@ This service provides two endpoints:
 - **`GET /`** - Health check endpoint
 - **`GET /merge`** - Merges PDFs from a resource's member list
 
-The `/merge` endpoint accepts a resource URL via the `Apix-Ldp-Resource` header, fetches the member list, downloads the first file for each member, converts non-PDFs to PDF format, and returns a merged PDF.
+The `/merge` endpoint accepts a resource URL via the `X-Islandora-Event` header, fetches the member list, downloads files for each member (retrying alternate URLs if conversion fails), converts non-PDFs to PDF format, and returns a merged PDF.
 
 ## Requirements
 
@@ -93,16 +93,20 @@ curl -H "Apix-Ldp-Resource: https://example.com/resource" \
 1. Appends `/members-list?_format=json` to the resource URL
 2. Expects a JSON array with objects containing:
    - `nid` - Unique identifier for the member
-   - `field_*` - Fields containing file URLs
-3. Downloads the first file for each unique `nid`
-4. Converts non-PDF files to PDF with OCR (currently only supports images)
-5. Merges all PDFs into a single document
-6. Returns the merged PDF
+   - `field_*` - Fields containing file URLs (collects all URLs for each nid)
+3. For each unique `nid`:
+   - Attempts to download and convert files in order
+   - If conversion fails, retries with the next available URL
+   - Skips the nid if no URL produces a valid PDF
+4. Converts non-PDF files to PDF with OCR (currently supports image formats)
+5. Processes nids sequentially to maintain page ordering
+6. Merges all PDFs into a single document
+7. Returns the merged PDF
 
 ## Supported File Formats
 
 The application automatically converts the following formats to PDF:
-- **Images**: PNG, JPG, JPEG, GIF, BMP, TIFF, etc.
+- **Images**: PNG, JPG, TIFF, Jpeg2000, etc.
 - **PDF**: Already in PDF format (no conversion needed)
 
 ## Example Member List Format
@@ -183,13 +187,16 @@ You can also run a specific test file:
 
 ## Dependencies
 
-- **fastapi** - Modern web framework
-- **uvicorn** - ASGI server
-- **httpx** - Async HTTP client
-- **pypdf** - PDF manipulation and merging
-- **Pillow** - Image processing and conversion to PDF
-- **pdf2image** - PDF image extraction
+### Runtime Dependencies
+- **fastapi** (0.109.0) - Modern web framework for building APIs
+- **uvicorn** (0.27.0) - ASGI server for running FastAPI
+- **httpx** (0.25.2) - HTTP client for making requests
+- **requests** (2.31.0) - Additional HTTP library
+- **pypdf** (6.0.0) - PDF manipulation and merging
+- **Pillow** (10.1.0) - Image processing and conversion to PDF
+- **pdf2image** (1.16.3) - PDF image extraction
+- **pytesseract** (0.3.13) - Optical character recognition (OCR) for images
 
-Testing:
-- **pytest**
-- **pytest-asyncio**
+### Testing Dependencies
+- **pytest** - Testing framework
+- **pytest-mock** - Pytest plugin for mocking
