@@ -45,8 +45,12 @@ def test_image_conversion_and_page_merging():
         with open(static_pdf_path, "wb") as f:
             f.write(pdf_bytes)
 
-        # Merge both PDFs
-        merged_pdf = merge_pdf_files([converted_pdf, static_pdf_path], temp_dir)
+        # Merge both PDFs with titles
+        pdf_entries = [
+            (converted_pdf, "Cover Page"),
+            (static_pdf_path, "Score")
+        ]
+        merged_pdf = merge_pdf_files(pdf_entries, temp_dir)
         assert merged_pdf is not None
         assert os.path.exists(merged_pdf)
 
@@ -98,14 +102,17 @@ def test_merge_pdfs_endpoint(monkeypatch):
     members_data = [
         {
             "nid": "item1",
+            'title': "First Item Title",
             "field_document": "http://localhost:8000/resource/item1/MISSING"
         },
         {
             "nid": "item1",
+            'title': "First Item Title",
             "field_document": "http://localhost:8000/resource/item1/file1.jpf"
         },
         {
             "nid": "item2",
+            'title': "Second Item Title",
             "field_document": "http://localhost:8000/resource/item2/file2.pdf"
         }
     ]

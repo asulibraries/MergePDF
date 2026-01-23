@@ -152,7 +152,7 @@ async def merge_pdfs(
     
     logger.debug(f"Found {len(members_data)} members in {members_url}")
     
-    # Group files by nid and collect all file URLs for each
+    # Group files by nid and collect all file URLs for each, along with titles
     files_by_nid = {}
     for member in members_data:
         if not isinstance(member, dict):
@@ -162,20 +162,23 @@ async def merge_pdfs(
         if not nid:
             continue
 
-        # Initialize list for this nid if not already present
+        # Initialize dict for this nid if not already present
         if nid not in files_by_nid:
-            files_by_nid[nid] = []
+            files_by_nid[nid] = {
+                "title": member.get("title", "Unknown"),
+                "urls": []
+            }
         
         # Find all field URLs for this nid
         for key, value in member.items():
             if key.startswith("field_") and isinstance(value, str) and value.startswith(("http://", "https://")):
-                files_by_nid[nid].append(value)
+                files_by_nid[nid]["urls"].append(value)
 
     # Remove nids with no files
-    files_by_nid = {nid: urls for nid, urls in files_by_nid.items() if urls}
+    files_by_nid = {nid: data for nid, data in files_by_nid.items() if data["urls"]}
 
     logger.debug(f"Found {len(files_by_nid)} unique nids with files in {members_url}")
-    total_file_urls = sum(len(urls) for urls in files_by_nid.values())
+    total_file_urls = sum(len(data["urls"]) for data in files_by_nid.values())
     logger.debug(f"Total file URLs to process: {total_file_urls}")
 
     if not files_by_nid:
@@ -189,7 +192,8 @@ async def merge_pdfs(
         pdf_files = []
         
         with httpx.Client(timeout=30.0, verify=False) as client:
-            for nid, file_urls in files_by_nid.items():
+            for nid, data in files_by_nid.items():
+                file_urls = data["urls"]
                 pdf_path = None
                 for attempt, file_url in enumerate(file_urls, 1):
                     try:
@@ -227,9 +231,18 @@ async def merge_pdfs(
         if not pdf_files:
             raise HTTPException(status_code=500, detail="Could not convert any files to PDF")
         
-        # Merge PDFs
+        # Merge PDFs with titles for outlines
         logger.debug(f"Merging {len(pdf_files)} PDF files for {members_url}")
-        merged_pdf_path = merge_pdf_files(pdf_files, processing_dir)
+        # Create a list of (pdf_path, title) tuples in the order they were processed
+        pdf_entries = []
+        for nid, data in files_by_nid.items():
+            # Find the corresponding pdf_path for this nid
+            for pdf_path in pdf_files:
+                if f"file_{nid}.pdf" in pdf_path:
+                    title = data.get("title", "Unknown")
+                    pdf_entries.append((pdf_path, title))
+                    break
+        merged_pdf_path = merge_pdf_files(pdf_entries, processing_dir)
         
         logger.info(f"Successfully created merged PDF ({merged_pdf_path}) for {members_url}")
         
@@ -417,20 +430,29 @@ def convert_to_pdf(file_bytes: bytes, content_type: str, temp_dir: str, identifi
         return None
 
 
-def merge_pdf_files(pdf_paths: list, temp_dir: str) -> str:
+def merge_pdf_files(pdf_entries: list, temp_dir: str) -> str:
     """
-    Merge multiple PDF files into a single PDF.
+    Merge multiple PDF files into a single PDF with outline entries.
+    pdf_entries: List of tuples (pdf_path, title)
     Returns the path to the merged PDF.
     """
     writer = PdfWriter()
 
     try:
-        for pdf_path in pdf_paths:
+        for pdf_path, title in pdf_entries:
             try:
                 reader = PdfReader(pdf_path)
                 try:
+                    # Record the current page number before adding pages
+                    page_number = len(writer.pages)
+
                     for page in reader.pages:
                         writer.add_page(page)
+
+                    # Add outline entry for this PDF at its starting page
+                    if title:
+                        writer.add_outline_item(title, page_number)
+                        logger.debug(f"Added outline item '{title}' at page {page_number}")
                 finally:
                     reader.close()
             except Exception as e:
