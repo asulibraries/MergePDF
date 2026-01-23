@@ -129,8 +129,8 @@ async def merge_pdfs(
     
     try:
         # Fetch the members list
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-            response = await client.get(members_url)
+        with httpx.Client(timeout=30.0, verify=False) as client:
+            response = client.get(members_url)
             response.raise_for_status()
             members_data = response.json()
     except httpx.ConnectError as e:
@@ -188,13 +188,13 @@ async def merge_pdfs(
     try:
         pdf_files = []
         
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        with httpx.Client(timeout=30.0, verify=False) as client:
             for nid, file_urls in files_by_nid.items():
                 pdf_path = None
                 for attempt, file_url in enumerate(file_urls, 1):
                     try:
                         logger.debug(f"Downloading file for nid {nid} (attempt {attempt}/{len(file_urls)}) from: {file_url}")
-                        response = await client.get(file_url)
+                        response = client.get(file_url)
                         response.raise_for_status()
 
                         # Determine file extension from content-type
@@ -202,7 +202,7 @@ async def merge_pdfs(
                         file_bytes = response.content
 
                         # Convert non-PDF files to PDF
-                        pdf_path = await convert_to_pdf(file_bytes, content_type, processing_dir, nid)
+                        pdf_path = convert_to_pdf(file_bytes, content_type, processing_dir, nid)
                         if pdf_path:
                             logger.debug(f"Successfully converted file for nid {nid} from {file_url}")
                             break  # Successfully converted, move to next nid
@@ -229,7 +229,7 @@ async def merge_pdfs(
         
         # Merge PDFs
         logger.debug(f"Merging {len(pdf_files)} PDF files for {members_url}")
-        merged_pdf_path = await merge_pdf_files(pdf_files, processing_dir)
+        merged_pdf_path = merge_pdf_files(pdf_files, processing_dir)
         
         logger.info(f"Successfully created merged PDF ({merged_pdf_path}) for {members_url}")
         
@@ -245,8 +245,8 @@ async def merge_pdfs(
         logger.debug(f"Fetching TID from: {tid_endpoint}")
 
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-                tid_response = await client.get(tid_endpoint, headers={"Authorization": auth_token})
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                tid_response = client.get(tid_endpoint, headers={"Authorization": auth_token})
                 tid_response.raise_for_status()
                 tid_data = tid_response.json()
 
@@ -310,7 +310,7 @@ async def merge_pdfs(
 
 
 
-async def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -> str:
+def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -> str:
     """
     Convert an image to PDF, fitting it within a standard letter-size canvas (8.5" x 11").
     The image is scaled proportionally to fit within the canvas and centered on a white background.
@@ -388,7 +388,7 @@ async def _fit_image_to_pdf(file_bytes: bytes, temp_dir: str, identifier: str) -
         image.close()
 
 
-async def convert_to_pdf(file_bytes: bytes, content_type: str, temp_dir: str, identifier: str) -> Optional[str]:
+def convert_to_pdf(file_bytes: bytes, content_type: str, temp_dir: str, identifier: str) -> Optional[str]:
     """
     Convert a file to PDF if it's not already a PDF.
     Returns the path to the PDF file.
@@ -404,20 +404,20 @@ async def convert_to_pdf(file_bytes: bytes, content_type: str, temp_dir: str, id
     # Convert image formats to PDF
     if content_type.startswith("image/"):
         try:
-            return await _fit_image_to_pdf(file_bytes, temp_dir, identifier)
+            return _fit_image_to_pdf(file_bytes, temp_dir, identifier)
         except Exception as e:
             logger.error(f"Failed to convert image {identifier} to PDF: {str(e)}")
             return None
     
     # For other formats, try to treat as image
     try:
-        return await _fit_image_to_pdf(file_bytes, temp_dir, identifier)
+        return _fit_image_to_pdf(file_bytes, temp_dir, identifier)
     except Exception as e:
         logger.warning(f"Could not convert file {identifier} with content-type {content_type}: {str(e)}")
         return None
 
 
-async def merge_pdf_files(pdf_paths: list, temp_dir: str) -> str:
+def merge_pdf_files(pdf_paths: list, temp_dir: str) -> str:
     """
     Merge multiple PDF files into a single PDF.
     Returns the path to the merged PDF.

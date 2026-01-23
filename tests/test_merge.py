@@ -4,7 +4,7 @@ import tempfile
 import pytest
 import base64
 import json
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 from pypdf import PdfReader
 from fastapi.testclient import TestClient
 
@@ -15,18 +15,16 @@ from app.main import convert_to_pdf, merge_pdf_files, DPI, LETTER_WIDTH_PX, LETT
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
-@pytest.mark.asyncio
-async def test_broken_jpf():
+def test_broken_jpf():
     image_path = os.path.join(ASSETS_DIR, "PALGEN_SEP-2736_Adjusted.jpf")
     with open(image_path, "rb") as f:
         image_bytes = f.read()
     with tempfile.TemporaryDirectory() as temp_dir:
-        converted_pdf = await convert_to_pdf(image_bytes, "application/octet-stream", temp_dir, "photo")
+        converted_pdf = convert_to_pdf(image_bytes, "application/octet-stream", temp_dir, "photo")
         assert converted_pdf is not None
         assert os.path.exists(converted_pdf)
 
-@pytest.mark.asyncio
-async def test_image_conversion_and_page_merging():
+def test_image_conversion_and_page_merging():
     # Static test files
     image_path = os.path.join(ASSETS_DIR, "SM219_WeGetUpAt8AM_1900_FrontCover.jpf")
     pdf_path = os.path.join(ASSETS_DIR, "SM219_WeGetUpAt8AM_1900_Score.pdf")
@@ -38,7 +36,7 @@ async def test_image_conversion_and_page_merging():
 
     with tempfile.TemporaryDirectory() as temp_dir:
         # Convert image to PDF
-        converted_pdf = await convert_to_pdf(image_bytes, "image/jpf", temp_dir, "cover")
+        converted_pdf = convert_to_pdf(image_bytes, "image/jpf", temp_dir, "cover")
         assert converted_pdf is not None
         assert os.path.exists(converted_pdf)
 
@@ -48,7 +46,7 @@ async def test_image_conversion_and_page_merging():
             f.write(pdf_bytes)
 
         # Merge both PDFs
-        merged_pdf = await merge_pdf_files([converted_pdf, static_pdf_path], temp_dir)
+        merged_pdf = merge_pdf_files([converted_pdf, static_pdf_path], temp_dir)
         assert merged_pdf is not None
         assert os.path.exists(merged_pdf)
 
@@ -125,18 +123,18 @@ def test_merge_pdfs_endpoint(monkeypatch):
         def raise_for_status(self):
             pass
 
-    # Create an AsyncMock client that returns different responses
-    class MockAsyncClient:
+    # Create a mock client that returns different responses
+    class MockClient:
         def __init__(self, **kwargs):
             pass
 
-        async def __aenter__(self):
+        def __enter__(self):
             return self
 
-        async def __aexit__(self, *args):
+        def __exit__(self, *args):
             pass
 
-        async def get(self, url, **kwargs):
+        def get(self, url, **kwargs):
             if "members-list" in url:
                 return MockResponse(json_data=members_data)
             elif "term_from_term_name" in url:
@@ -176,8 +174,8 @@ def test_merge_pdfs_endpoint(monkeypatch):
                     headers={"content-type": "application/pdf"}
                 )
 
-    # Mock the httpx.AsyncClient
-    monkeypatch.setattr(app_main.httpx, "AsyncClient", MockAsyncClient)
+    # Mock the httpx.Client
+    monkeypatch.setattr(app_main.httpx, "Client", MockClient)
 
     # Mock the sync httpx.put and save the file for manual review
     put_called = []
