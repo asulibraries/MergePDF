@@ -152,7 +152,7 @@ async def merge_pdfs(
     
     logger.debug(f"Found {len(members_data)} members in {members_url}")
     
-    # Group files by nid and get the first file for each
+    # Group files by nid and collect all file URLs for each
     files_by_nid = {}
     for member in members_data:
         if not isinstance(member, dict):
@@ -161,23 +161,23 @@ async def merge_pdfs(
         nid = member.get("nid")
         if not nid:
             continue
+
+        # Initialize list for this nid if not already present
+        if nid not in files_by_nid:
+            files_by_nid[nid] = []
         
-        # Skip if we already have a file for this nid
-        if nid in files_by_nid:
-            continue
-        
-        # Find the first field with a URL (file)
-        file_url = None
+        # Find all field URLs for this nid
         for key, value in member.items():
             if key.startswith("field_") and isinstance(value, str) and value.startswith(("http://", "https://")):
-                file_url = value
-                break
-        
-        if file_url:
-            files_by_nid[nid] = file_url
-    
+                files_by_nid[nid].append(value)
+
+    # Remove nids with no files
+    files_by_nid = {nid: urls for nid, urls in files_by_nid.items() if urls}
+
     logger.debug(f"Found {len(files_by_nid)} unique nids with files in {members_url}")
-    
+    total_file_urls = sum(len(urls) for urls in files_by_nid.values())
+    logger.debug(f"Total file URLs to process: {total_file_urls}")
+
     if not files_by_nid:
         raise HTTPException(status_code=400, detail=f"No files found in members data for {members_url}")
     
@@ -189,31 +189,41 @@ async def merge_pdfs(
         pdf_files = []
         
         async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-            for nid, file_url in files_by_nid.items():
-                try:
-                    logger.debug(f"Downloading file for nid {nid} from: {file_url}")
-                    response = await client.get(file_url)
-                    response.raise_for_status()
-                    
-                    # Determine file extension from content-type
-                    content_type = response.headers.get("content-type", "application/octet-stream")
-                    file_bytes = response.content
-                    
-                    # Convert non-PDF files to PDF
-                    pdf_path = await convert_to_pdf(file_bytes, content_type, processing_dir, nid)
-                    if pdf_path:
-                        pdf_files.append(pdf_path)
-                
-                except httpx.ConnectError as e:
-                    logger.error(f"Failed to download file from {file_url}: {str(e)}")
-                    continue
-                except httpx.TimeoutException as e:
-                    logger.error(f"Timeout downloading from {file_url}: {str(e)}")
-                    continue
-                except Exception as e:
-                    logger.error(f"Error processing file for nid {nid}: {str(e)}")
-                    continue
-        
+            for nid, file_urls in files_by_nid.items():
+                pdf_path = None
+                for attempt, file_url in enumerate(file_urls, 1):
+                    try:
+                        logger.debug(f"Downloading file for nid {nid} (attempt {attempt}/{len(file_urls)}) from: {file_url}")
+                        response = await client.get(file_url)
+                        response.raise_for_status()
+
+                        # Determine file extension from content-type
+                        content_type = response.headers.get("content-type", "application/octet-stream")
+                        file_bytes = response.content
+
+                        # Convert non-PDF files to PDF
+                        pdf_path = await convert_to_pdf(file_bytes, content_type, processing_dir, nid)
+                        if pdf_path:
+                            logger.debug(f"Successfully converted file for nid {nid} from {file_url}")
+                            break  # Successfully converted, move to next nid
+                        else:
+                            logger.warning(f"Failed to convert file for nid {nid} from {file_url}, trying next URL if available")
+
+                    except httpx.ConnectError as e:
+                        logger.warning(f"Failed to download file from {file_url}: {str(e)}, trying next URL if available")
+                        continue
+                    except httpx.TimeoutException as e:
+                        logger.warning(f"Timeout downloading from {file_url}: {str(e)}, trying next URL if available")
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Error processing nid {nid} file {file_url}: {str(e)}, trying next URL if available")
+                        continue
+
+                if pdf_path:
+                    pdf_files.append(pdf_path)
+                else:
+                    logger.error(f"Could not process any file URL for nid {nid}")
+
         if not pdf_files:
             raise HTTPException(status_code=500, detail="Could not convert any files to PDF")
         

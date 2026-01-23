@@ -96,7 +96,12 @@ def test_merge_pdfs_endpoint(monkeypatch):
         file2_bytes = f.read()
 
     # Members list response data
+    # Simulate one missing file (code should fall back to the next 'item1'), one JPF, and one PDF.
     members_data = [
+        {
+            "nid": "item1",
+            "field_document": "http://localhost:8000/resource/item1/MISSING"
+        },
         {
             "nid": "item1",
             "field_document": "http://localhost:8000/resource/item1/file1.jpf"
@@ -158,6 +163,11 @@ def test_merge_pdfs_endpoint(monkeypatch):
                     content=file2_bytes,
                     headers={"content-type": "application/pdf"}
                 )
+            elif "MISSING" in url:
+                # Simulate missing file
+                response = MockResponse()
+                response.raise_for_status = MagicMock(side_effect=Exception("404 Not Found"))
+                return response
             else:
                 # Default file download
                 return MockResponse(
