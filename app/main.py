@@ -39,15 +39,28 @@ app = FastAPI(title="Merge PDF API", version="1.0.0")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-	exc_str = f'{exc}'.replace('\n', ' ').replace('   ', ' ')
+    exc_str = f'{exc}'.replace('\n', ' ').replace('   ', ' ')
 
     # Extract headers as a dict
-	headers = dict(request.headers)
-	headers_str = ", ".join(f"{k}: {v}" for k, v in headers.sitems())
+    headers = dict(request.headers)
+    headers_str = ", ".join(f"{k}: {v}" for k, v in headers.items())
+    logger.warning(f"Validation error for {request.method} {request.url}: {exc_str} | Headers: {headers_str}")
+    content = {'status_code': 10422, 'message': exc_str, 'data': None}
+    return JSONResponse(content=content, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-	logging.error(f"{request}: {exc_str}  | Headers: {headers_str}")
-	content = {'status_code': 10422, 'message': exc_str, 'data': None}
-	return JSONResponse(content=content, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Log client (4XX) HTTPExceptions so failing requests are visible in logs.
+    Returns a JSONResponse mirroring the exception.
+    """
+    status_code = getattr(exc, "status_code", None)
+    message = getattr(exc, "detail", str(exc))
+    if status_code and 400 <= status_code < 500:
+        headers = dict(request.headers)
+        headers_str = ", ".join(f"{k}: {v}" for k, v in headers.items())
+        logger.warning(f"Client error {status_code} for {request.method} {request.url}: {message} | Headers: {headers_str}")
+    return JSONResponse(content={"detail": message}, status_code=status_code or 500)
 
 # Debug / keep-files flag driven by environment variable
 # Set `MERGEPDF_KEEP_FILES=1` or `true` to keep downloaded/merged files for debugging

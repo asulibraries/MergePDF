@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import logging
 import pytest
 import base64
 import json
@@ -224,3 +225,35 @@ def test_merge_pdfs_endpoint(monkeypatch):
     put_url, put_kwargs = put_called[0]
     assert "media/document" in put_url
     assert put_kwargs["headers"]["Content-Type"] == "application/pdf"
+
+
+def test_logs_on_invalid_event_header(caplog):
+    """When X-Islandora-Event is present but invalid (not base64), we return 400 and log a WARNING."""
+    client = TestClient(app)
+    caplog.set_level(logging.WARNING)
+    headers = {"X-Islandora-Event": "not-base64", "Authorization": "Bearer test-token"}
+    response = client.get("/merge", headers=headers)
+    assert response.status_code == 400
+    assert response.json().get("detail") == "Invalid X-Islandora-Event header: must be base64 encoded JSON"
+
+    # Ensure a WARNING log was emitted for client error 400
+    found = any(
+        rec.levelname == "WARNING" and "Client error 400" in rec.message and "Invalid X-Islandora-Event header" in rec.message
+        for rec in caplog.records
+    )
+    assert found, f"Expected WARNING log for client 400 error, logs: {[r.message for r in caplog.records]}"
+
+
+def test_logs_on_missing_header(caplog):
+    """When the required header is missing, the validation handler returns 422 and logs a WARNING."""
+    client = TestClient(app)
+    caplog.set_level(logging.WARNING)
+    response = client.get("/merge")
+    assert response.status_code == 422
+
+    # Our validation handler logs at WARNING; check for the validation message
+    found = any(
+        rec.levelname == "WARNING" and rec.message.startswith("Validation error for GET")
+        for rec in caplog.records
+    )
+    assert found, f"Expected WARNING log for validation error, logs: {[r.message for r in caplog.records]}"
