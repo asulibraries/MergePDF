@@ -41,8 +41,11 @@ app = FastAPI(title="Merge PDF API", version="1.0.0")
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     exc_str = f'{exc}'.replace('\n', ' ').replace('   ', ' ')
 
-    # Extract headers as a dict
+    # Extract headers as a dict and remove Authorization for logging
     headers = dict(request.headers)
+    # Do not include Authorization header in logs
+    headers.pop("Authorization", None)
+    headers.pop("authorization", None)
     headers_str = ", ".join(f"{k}: {v}" for k, v in headers.items())
     logger.warning(f"Validation error for {request.method} {request.url}: {exc_str} | Headers: {headers_str}")
     content = {'status_code': 10422, 'message': exc_str, 'data': None}
@@ -58,6 +61,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     message = getattr(exc, "detail", str(exc))
     if status_code and 400 <= status_code < 500:
         headers = dict(request.headers)
+        # Do not include Authorization header in logs
+        headers.pop("Authorization", None)
+        headers.pop("authorization", None)
         headers_str = ", ".join(f"{k}: {v}" for k, v in headers.items())
         logger.warning(f"Client error {status_code} for {request.method} {request.url}: {message} | Headers: {headers_str}")
     return JSONResponse(content={"detail": message}, status_code=status_code or 500)
